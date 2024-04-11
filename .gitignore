@@ -1,0 +1,5 @@
+.vscode/
+third_party/
+vendor/
+build/
+.bak/
