@@ -2,6 +2,7 @@ package async
 
 import (
 	"context"
+	"time"
 
 	"github.com/go-kratos/kratos/v2/log"
 	"github.com/google/uuid"
@@ -31,8 +32,15 @@ func WithReplyTo(replyTo string) ClientOptionFunc {
 	}
 }
 
+func WithDelayExchange(ex string) ClientOptionFunc {
+	return func(p *Client) {
+		p.delayEx = ex
+	}
+}
+
 type CallOption struct {
-	id string
+	id    string
+	delay time.Duration
 }
 
 type CallOptionFunc func(*CallOption)
@@ -43,8 +51,15 @@ func WithCallID(id string) CallOptionFunc {
 	}
 }
 
+func WithCallDelay(delay time.Duration) CallOptionFunc {
+	return func(o *CallOption) {
+		o.delay = delay
+	}
+}
+
 type Client struct {
 	replyTo string
+	delayEx string
 	ch      *amqp.Channel
 	codec   encoding.Codec
 
@@ -58,9 +73,10 @@ func NewClient(conn async.Conn, opts ...ClientOptionFunc) (*Client, error) {
 	}
 
 	p := Client{
-		ch:    ch,
-		codec: json_enc.Codec{},
-		log:   log.DefaultLogger,
+		ch:      ch,
+		delayEx: DefaultDelayExchange,
+		codec:   json_enc.Codec{},
+		log:     log.DefaultLogger,
 	}
 
 	for _, opt := range opts {
@@ -85,6 +101,7 @@ func (cli *Client) call(ctx context.Context, queue string, m interface{}, opts .
 		o.id = uuid.NewString()
 	}
 
+	var ex string
 	msg := amqp.Publishing{
 		CorrelationId: o.id,
 		ReplyTo:       cli.replyTo,
@@ -92,9 +109,16 @@ func (cli *Client) call(ctx context.Context, queue string, m interface{}, opts .
 		Body:          payload,
 	}
 
+	if o.delay > 0 {
+		ex = cli.delayEx
+		msg.Headers = amqp.Table{
+			"x-delay": o.delay.Milliseconds(),
+		}
+	}
+
 	return o.id, cli.ch.PublishWithContext(
 		ctx,
-		"", // 默认 exchange
+		ex, // 默认 exchange OR delay exchange
 		queue,
 		true, // mandatory：当消息无法路由到队列时，会触发Return
 		false,
@@ -102,12 +126,12 @@ func (cli *Client) call(ctx context.Context, queue string, m interface{}, opts .
 	)
 }
 
-func (p *Client) Call(ctx context.Context, queue string, m interface{}, opts ...CallOptionFunc) (string, error) {
-	return p.call(ctx, queue, m)
+func (cli *Client) Call(ctx context.Context, queue string, m interface{}, opts ...CallOptionFunc) (string, error) {
+	return cli.call(ctx, queue, m, opts...)
 }
 
-func (cli *Client) Do(ctx context.Context, queue string, m interface{}, opts ...CallOptionFunc) error {
-	_, err := cli.call(ctx, queue, m)
+func (cli *Client) DirectCall(ctx context.Context, queue string, m interface{}, opts ...CallOptionFunc) error {
+	_, err := cli.call(ctx, queue, m, opts...)
 	return err
 }
 

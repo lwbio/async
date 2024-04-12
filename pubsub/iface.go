@@ -7,6 +7,14 @@ import (
 	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
+type Key string
+
+const (
+	KeyCorrelationID Key = "correlation_id"
+	KeyReplyTo       Key = "reply_to"
+	KeyExchange      Key = "exchange"
+)
+
 var (
 	ErrHandlerNotFound = errors.New("handler not found")
 	ErrExchangeNotInit = errors.New("exchange not init")
