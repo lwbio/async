@@ -5,6 +5,7 @@ import (
 
 	"github.com/go-kratos/kratos/v2/log"
 	"github.com/google/uuid"
+	"github.com/lwbio/async"
 	"github.com/lwbio/async/encoding"
 	json_enc "github.com/lwbio/async/encoding/json"
 	amqp "github.com/rabbitmq/amqp091-go"
@@ -50,8 +51,8 @@ type Client struct {
 	log log.Logger
 }
 
-func NewClient(mq MQ, opts ...ClientOptionFunc) (*Client, error) {
-	ch, err := mq.Channel()
+func NewClient(conn async.Conn, opts ...ClientOptionFunc) (*Client, error) {
+	ch, err := conn.Channel()
 	if err != nil {
 		return nil, err
 	}

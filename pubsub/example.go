@@ -1,9 +1,10 @@
-package async
+package pubsub
 
 import (
 	"context"
 
 	"github.com/go-kratos/kratos/v2/log"
+	"github.com/lwbio/async"
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
@@ -20,7 +21,7 @@ func (s *Service) Test(ctx context.Context, body []byte) error {
 	return nil
 }
 
-func NewSubscriberServer(mq MQ, svc *Service, logger log.Logger) *Subscriber {
+func NewSubscriberServer(mq async.Conn, svc *Service, logger log.Logger) *Subscriber {
 	var opts = []SubscriberOptionFunc{
 		WithSubscriberLogger(log.With(logger, "module", "server/sub")),
 	}

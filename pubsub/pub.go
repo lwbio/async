@@ -1,9 +1,10 @@
-package async
+package pubsub
 
 import (
 	"context"
 
 	"github.com/go-kratos/kratos/v2/log"
+	"github.com/lwbio/async"
 	amqp "github.com/rabbitmq/amqp091-go"
 	"google.golang.org/protobuf/proto"
 )
@@ -43,8 +44,8 @@ type Publisher struct {
 	log *log.Helper
 }
 
-func NewPublisher(mq MQ, logger log.Logger, opts ...PublisherOptionFunc) (*Publisher, error) {
-	ch, err := mq.Channel()
+func NewPublisher(conn async.Conn, logger log.Logger, opts ...PublisherOptionFunc) (*Publisher, error) {
+	ch, err := conn.Channel()
 	if err != nil {
 		return nil, err
 	}
@@ -87,7 +88,7 @@ func (p *Publisher) publish(ctx context.Context, et PbEvent, m proto.Message, op
 	if err != nil {
 		return err
 	}
-	
+
 	msg := amqp.Publishing{
 		ContentType: "application/octet-stream",
 		Body:        payload,

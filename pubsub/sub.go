@@ -1,4 +1,4 @@
-package async
+package pubsub
 
 import (
 	"context"
@@ -6,6 +6,7 @@ import (
 	"reflect"
 
 	"github.com/go-kratos/kratos/v2/log"
+	"github.com/lwbio/async"
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
@@ -55,7 +56,7 @@ type consumer struct {
 
 type Subscriber struct {
 	id        string
-	conn      MQ
+	conn      async.Conn
 	channel   *amqp.Channel
 	scs       []reflect.SelectCase
 	consumers []consumer
@@ -63,14 +64,14 @@ type Subscriber struct {
 	log log.Logger
 }
 
-func NewSubscriber(mq MQ, opts ...SubscriberOptionFunc) (*Subscriber, error) {
-	channel, err := mq.Channel()
+func NewSubscriber(conn async.Conn, opts ...SubscriberOptionFunc) (*Subscriber, error) {
+	channel, err := conn.Channel()
 	if err != nil {
 		return nil, err
 	}
 
 	s := Subscriber{
-		conn:      mq,
+		conn:      conn,
 		channel:   channel,
 		id:        "async", // TODO: package name
 		consumers: make([]consumer, 0),

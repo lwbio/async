@@ -5,12 +5,13 @@ import (
 	"reflect"
 
 	"github.com/go-kratos/kratos/v2/log"
+	"github.com/lwbio/async"
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
-type serverOptionFunc func(*Server)
+type ServerOptionFunc func(*Server)
 
-type registerOptionFunc func(*consumer)
+type RegisterOptionFunc func(*consumer)
 
 type consumer struct {
 	queue    string
@@ -19,7 +20,7 @@ type consumer struct {
 }
 
 type Server struct {
-	conn      MQ
+	conn      async.Conn
 	ch        *amqp.Channel
 	scs       []reflect.SelectCase
 	consumers []consumer
@@ -29,14 +30,14 @@ type Server struct {
 	log *log.Helper
 }
 
-func NewServer(mq MQ, opts ...serverOptionFunc) (*Server, error) {
-	channel, err := mq.Channel()
+func NewServer(conn async.Conn, opts ...ServerOptionFunc) (*Server, error) {
+	channel, err := conn.Channel()
 	if err != nil {
 		return nil, err
 	}
 
 	s := Server{
-		conn:      mq,
+		conn:      conn,
 		ch:        channel,
 		scs:       make([]reflect.SelectCase, 0),
 		consumers: make([]consumer, 0),
@@ -52,7 +53,7 @@ func NewServer(mq MQ, opts ...serverOptionFunc) (*Server, error) {
 	return &s, nil
 }
 
-func (s *Server) register(h Handler, queue string, resultEx string, opts ...registerOptionFunc) error {
+func (s *Server) register(h Handler, queue string, resultEx string, opts ...RegisterOptionFunc) error {
 	c := consumer{
 		handle:   h,
 		queue:    queue,
@@ -99,11 +100,11 @@ func (s *Server) register(h Handler, queue string, resultEx string, opts ...regi
 	return nil
 }
 
-func (s *Server) Register(h Handler, queue string, resultEx string, opts ...registerOptionFunc) error {
+func (s *Server) Register(h Handler, queue string, resultEx string, opts ...RegisterOptionFunc) error {
 	return s.register(h, queue, resultEx, opts...)
 }
 
-func (s *Server) MustRegister(h Handler, queue string, resultEx string, opts ...registerOptionFunc) {
+func (s *Server) MustRegister(h Handler, queue string, resultEx string, opts ...RegisterOptionFunc) {
 	if err := s.Register(h, queue, resultEx, opts...); err != nil {
 		panic(err)
 	}

@@ -2,8 +2,6 @@ package async
 
 import (
 	"errors"
-
-	"github.com/rabbitmq/amqp091-go"
 )
 
 var (
@@ -12,7 +10,3 @@ var (
 )
 
 type Handler func(ctx Context) error
-
-type MQ interface {
-	Channel() (*amqp091.Channel, error)
-}
