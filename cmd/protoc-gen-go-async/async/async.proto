@@ -1,0 +1,14 @@
+syntax = "proto3";
+
+package async;
+
+option go_package = "github.com/lwbio/async/annotations/async;async";
+
+import "google/protobuf/descriptor.proto";
+
+
+// rpc method 注解
+extend google.protobuf.MethodOptions {
+  // 是否启用异步
+  bool enable = 12138;
+}

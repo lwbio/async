@@ -2,68 +2,48 @@ package async
 
 import (
 	"context"
-	"fmt"
 	"reflect"
 
 	"github.com/go-kratos/kratos/v2/log"
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
-type ServerOptionFunc func(*Server)
+type serverOptionFunc func(*Server)
 
-type registerOption struct {
-	topic    string
-	returnEt PbEvent // 返参event
-}
+type registerOptionFunc func(*consumer)
 
-type registerOptionFunc func(*registerOption)
-
-func WithTopic(topic string) registerOptionFunc {
-	return func(o *registerOption) {
-		o.topic = topic
-	}
-}
-
-func WithReturnEt(et PbEvent) registerOptionFunc {
-	return func(o *registerOption) {
-		o.returnEt = et
-	}
-}
-
-type Consumer struct {
-	inQ    string
-	outQ   string
-	handle Handler1
+type consumer struct {
+	queue    string
+	resultEx string
+	handle   Handler
 }
 
 type Server struct {
+	conn      MQ
 	ch        *amqp.Channel
 	scs       []reflect.SelectCase
-	consumers []*Consumer
+	consumers []consumer
 	dec       DecodeRequestFunc
 	enc       EncodeResponseFunc
-	errCh     chan *amqp.Error
 
 	log *log.Helper
 }
 
-func NewServer(mq MQ, opts ...ServerOptionFunc) (*Server, error) {
+func NewServer(mq MQ, opts ...serverOptionFunc) (*Server, error) {
 	channel, err := mq.Channel()
 	if err != nil {
 		return nil, err
 	}
 
 	s := Server{
+		conn:      mq,
 		ch:        channel,
 		scs:       make([]reflect.SelectCase, 0),
-		consumers: make([]*Consumer, 0),
+		consumers: make([]consumer, 0),
 		dec:       DefaultRequestDecoder,
 		enc:       DefaultResponseEncoder,
 		log:       log.NewHelper(log.DefaultLogger),
-		errCh:     make(chan *amqp.Error),
 	}
-
-	channel.NotifyClose(s.errCh)
 
 	for _, opt := range opts {
 		opt(&s)
@@ -72,18 +52,39 @@ func NewServer(mq MQ, opts ...ServerOptionFunc) (*Server, error) {
 	return &s, nil
 }
 
-func (s *Server) Register(queue string, h Handler1) {
-	// 生成queue name
-	qn := queue
+func (s *Server) register(h Handler, queue string, resultEx string, opts ...registerOptionFunc) error {
+	c := consumer{
+		handle:   h,
+		queue:    queue,
+		resultEx: resultEx,
+	}
+	for _, opt := range opts {
+		opt(&c)
+	}
 
 	// 声明queue
-	_, err := s.ch.QueueDeclare(qn, false, false, false, false, nil) // TODO: autoDelete
+	q, err := s.ch.QueueDeclare(queue, false, false, false, false, nil) // TODO: autoDelete
 	if err != nil {
-		panic(err)
+		return err
+	}
+
+	// 声明result exchange
+	if resultEx != "" {
+		if err := s.ch.ExchangeDeclare(
+			resultEx,
+			amqp.ExchangeTopic,
+			true,
+			false,
+			false,
+			false,
+			nil,
+		); err != nil {
+			return err
+		}
 	}
 
 	// 监听queue
-	channel, err := s.ch.Consume(qn, qn, false, false, false, false, nil)
+	channel, err := s.ch.Consume(q.Name, q.Name, false, false, false, false, nil)
 	if err != nil {
 		panic(err)
 	}
@@ -92,71 +93,67 @@ func (s *Server) Register(queue string, h Handler1) {
 		Dir:  reflect.SelectRecv,
 		Chan: reflect.ValueOf(channel),
 	})
-
-	c := &Consumer{
-		inQ:    qn,
-		handle: h,
-	}
 	s.consumers = append(s.consumers, c)
 
-	s.log.Infof("register handler: %s", qn)
+	s.log.Infof("register handler: %s", q.Name)
+	return nil
+}
+
+func (s *Server) Register(h Handler, queue string, resultEx string, opts ...registerOptionFunc) error {
+	return s.register(h, queue, resultEx, opts...)
+}
+
+func (s *Server) MustRegister(h Handler, queue string, resultEx string, opts ...registerOptionFunc) {
+	if err := s.Register(h, queue, resultEx, opts...); err != nil {
+		panic(err)
+	}
 }
 
 func (s *Server) Start(ctx context.Context) error {
-	s.log.Infof("server start...")
-	defer s.log.Infof("server stop!")
-	go func() {
-		for err := range s.errCh {
-			s.log.Errorf("channel error: %v", err)
-		}
-	}()
-
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		default:
-			// 1. 从队列中获取任务
-			// 2. 根据任务类型，调用对应的处理函数
-			// 3. 处理函数返回错误，重新入队列
 			chosen, recv, recvOk := reflect.Select(s.scs)
-			if recvOk {
-				c := s.consumers[chosen]
-				message := recv.Interface().(amqp.Delivery)
-				go func(msg amqp.Delivery) {
-					defer msg.Ack(false)
-
-					w := &wrapper{srv: s, ctx: ctx, req: &msg, resp: nil}
-					if err := c.handle(w); err != nil {
-						s.log.Errorf("handle %s error: %v", c.inQ, err)
-						return
-					}
-
-					fmt.Printf("result [%s]: %s\n", w.resp.CorrelationId, string(w.resp.Body))
-
-					if c.outQ == "" || w.resp == nil {
-						return
-					}
-
-					if err := s.returnResponse(ctx, c.outQ, w.resp); err != nil {
-						s.log.Errorf("return response error: %v", err)
-					}
-				}(message)
+			if !recvOk {
+				continue
 			}
+			c := s.consumers[chosen]
+			msg := recv.Interface().(amqp.Delivery)
+
+			go s.handle(ctx, msg, c)
 		}
 	}
 }
 
-func (s *Server) returnResponse(
-	ctx context.Context,
-	outQ string,
-	msg *amqp.Publishing,
+func (s *Server) handle(ctx context.Context, msg amqp.Delivery, c consumer) error {
+	defer func() {
+		if r := recover(); r != nil {
+			s.log.Errorf("handle error: %v", r)
+		}
+	}()
+	defer msg.Ack(false)
+
+	w := &wrapper{srv: s, ctx: ctx, req: &msg}
+	if err := c.handle(w); err != nil {
+		return err
+	}
+
+	if err := s.result(ctx, c.resultEx, w.resp); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (s *Server) result(ctx context.Context, ex string, msg *amqp.Publishing,
 ) error {
 	if msg == nil {
 		return nil
 	}
 
-	return s.ch.PublishWithContext(ctx, "", outQ, false, false, *msg)
+	return s.ch.PublishWithContext(ctx, ex, msg.ReplyTo, false, false, *msg)
 }
 
 func (s *Server) Stop(ctx context.Context) error {

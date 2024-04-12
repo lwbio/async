@@ -5,124 +5,109 @@ import (
 
 	"github.com/go-kratos/kratos/v2/log"
 	"github.com/google/uuid"
+	"github.com/lwbio/async/encoding"
+	json_enc "github.com/lwbio/async/encoding/json"
 	amqp "github.com/rabbitmq/amqp091-go"
-	"google.golang.org/protobuf/proto"
 )
 
 type ClientOptionFunc func(*Client)
 
-func WithPbEvents(ets ...PbEvent) ClientOptionFunc {
+func WithCodec(c encoding.Codec) ClientOptionFunc {
 	return func(p *Client) {
-		for _, et := range ets {
-			p.queues[int32(et.Number())] = Qn(et)
-		}
+		p.codec = c
+	}
+}
+
+func WithLogger(logger log.Logger) ClientOptionFunc {
+	return func(p *Client) {
+		p.log = logger
+	}
+}
+
+func WithReplyTo(replyTo string) ClientOptionFunc {
+	return func(p *Client) {
+		p.replyTo = replyTo
 	}
 }
 
 type CallOption struct {
-	rk        string
-	mandatory bool
+	id string
 }
 
-type PublishOptionFunc func(*CallOption)
+type CallOptionFunc func(*CallOption)
 
-func WithRoutingKey(rk string) PublishOptionFunc {
+func WithCallID(id string) CallOptionFunc {
 	return func(o *CallOption) {
-		o.rk = rk
-	}
-}
-
-func WithMandatory() PublishOptionFunc {
-	return func(o *CallOption) {
-		o.mandatory = true
+		o.id = id
 	}
 }
 
 type Client struct {
-	ch     *amqp.Channel
-	queues map[int32]string
-	log    *log.Helper
+	replyTo string
+	ch      *amqp.Channel
+	codec   encoding.Codec
+
+	log log.Logger
 }
 
-func NewClient(mq MQ, logger log.Logger, opts ...ClientOptionFunc) (*Client, error) {
+func NewClient(mq MQ, opts ...ClientOptionFunc) (*Client, error) {
 	ch, err := mq.Channel()
 	if err != nil {
 		return nil, err
 	}
 
 	p := Client{
-		ch:     ch,
-		queues: make(map[int32]string),
-		log:    log.NewHelper(log.With(logger, "aysnc", "celery/client")),
+		ch:    ch,
+		codec: json_enc.Codec{},
+		log:   log.DefaultLogger,
 	}
 
 	for _, opt := range opts {
 		opt(&p)
 	}
 
-	// 创建队列
-	for _, queue := range p.queues {
-		if _, err := ch.QueueDeclare(
-			queue,
-			false,
-			false,
-			false,
-			false,
-			nil,
-		); err != nil {
-			return nil, err
-		}
-	}
-
 	return &p, nil
 }
 
-func (p *Client) call(ctx context.Context, et PbEvent, m proto.Message, opts ...PublishOptionFunc) (string, error) {
+func (cli *Client) call(ctx context.Context, queue string, m interface{}, opts ...CallOptionFunc) (string, error) {
 	o := &CallOption{}
 	for _, opt := range opts {
 		opt(o)
 	}
 
-	payload, err := proto.Marshal(m)
+	payload, err := cli.codec.Marshal(m)
 	if err != nil {
 		return "", err
 	}
 
-	id := uuid.New().String()
+	if o.id == "" {
+		o.id = uuid.NewString()
+	}
 
 	msg := amqp.Publishing{
-		CorrelationId: id,
-		ContentType:   "application/octet-stream",
+		CorrelationId: o.id,
+		ReplyTo:       cli.replyTo,
+		ContentType:   ContentType(cli.codec.Name()),
 		Body:          payload,
 	}
 
-	return id, p.ch.PublishWithContext(ctx, "", Qn(et), o.mandatory, false, msg)
+	return o.id, cli.ch.PublishWithContext(
+		ctx,
+		"", // 默认 exchange
+		queue,
+		true, // mandatory：当消息无法路由到队列时，会触发Return
+		false,
+		msg,
+	)
 }
 
-func (p *Client) Call(ctx context.Context, et PbEvent, m proto.Message) (string, error) {
-	return p.call(ctx, et, m)
+func (p *Client) Call(ctx context.Context, queue string, m interface{}, opts ...CallOptionFunc) (string, error) {
+	return p.call(ctx, queue, m)
 }
 
-func (cli *Client) DirectCall(ctx context.Context, et PbEvent, m proto.Message) error {
-	_, err := cli.call(ctx, et, m)
+func (cli *Client) Do(ctx context.Context, queue string, m interface{}, opts ...CallOptionFunc) error {
+	_, err := cli.call(ctx, queue, m)
 	return err
-}
-
-func (cli *Client) DirectCall1(ctx context.Context, queue string, m proto.Message) (string, error) {
-	payload, err := proto.Marshal(m)
-	if err != nil {
-		return "", err
-	}
-
-	id := uuid.New().String()
-
-	msg := amqp.Publishing{
-		CorrelationId: id,
-		ContentType:   "application/proto",
-		Body:          payload,
-	}
-
-	return id, cli.ch.PublishWithContext(ctx, "", queue, false, false, msg)
 }
 
 func (p *Client) Close() error {

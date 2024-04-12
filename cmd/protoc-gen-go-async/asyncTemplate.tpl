@@ -2,7 +2,8 @@
 {{$svrName := .ServiceName}}
 
 {{- range .MethodSets}}
-const AsyncOperation{{$svrType}}{{.OriginalName}} = "/{{$svrName}}/{{.OriginalName}}"
+const AsyncOperation{{$svrType}}{{.OriginalName}} = "{{$svrName}}.{{.OriginalName}}"
+const AsyncOperation{{$svrType}}{{.OriginalName}}Result = "{{$svrName}}.{{.OriginalName}}.Result"
 {{- end}}
 
 type {{.ServiceType}}AsyncServer interface {
@@ -16,7 +17,7 @@ type {{.ServiceType}}AsyncServer interface {
 
 func Register{{.ServiceType}}AsyncServer(s *async.Server, srv {{.ServiceType}}AsyncServer) {
 	{{- range .Methods}}
-	s.Register(AsyncOperation{{$svrType}}{{.OriginalName}}, _{{$svrType}}_{{.Name}}{{.Num}}_Async_Handler(srv))
+	s.MustRegister(_{{$svrType}}_{{.Name}}{{.Num}}_Async_Handler(srv), AsyncOperation{{$svrType}}{{.OriginalName}}, AsyncOperation{{$svrType}}{{.OriginalName}}Result)
 	{{- end}}
 }
 

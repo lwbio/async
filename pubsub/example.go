@@ -22,7 +22,7 @@ func (s *Service) Test(ctx context.Context, body []byte) error {
 
 func NewSubscriberServer(mq MQ, svc *Service, logger log.Logger) *Subscriber {
 	var opts = []SubscriberOptionFunc{
-		WithLogger(log.NewHelper(log.With(logger, "module", "server/sub"))),
+		WithSubscriberLogger(log.With(logger, "module", "server/sub")),
 	}
 	srv, err := NewSubscriber(mq, opts...)
 	if err != nil {

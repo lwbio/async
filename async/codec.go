@@ -37,6 +37,8 @@ func DefaultResponseEncoder(r *amqp091.Delivery, v interface{}) (rr *amqp091.Pub
 
 	return &amqp091.Publishing{
 		CorrelationId: r.CorrelationId,
+		ReplyTo:       r.ReplyTo,
+		Type:          r.Type,
 		ContentType:   ContentType(codec.Name()),
 		Body:          data,
 	}, nil

@@ -11,16 +11,8 @@ func Ex(et PbEvent) string {
 	return fmt.Sprintf("%s.%s", et.Descriptor().Parent().FullName(), strings.ToLower(et.String()))
 }
 
-func Qn(et PbEvent) string {
-	return fmt.Sprintf("%s.%s", et.Descriptor().Parent().FullName(), strings.ToLower(et.String()))
-}
-
 func Id(et PbEvent) string {
 	return string(et.Descriptor().Parent().FullName())
-}
-
-func QnFn(id string, fn string) string {
-	return fmt.Sprintf("%s.%s", id, fn)
 }
 
 /**
