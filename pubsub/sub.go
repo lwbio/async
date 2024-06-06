@@ -4,31 +4,38 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"time"
 
 	"github.com/go-kratos/kratos/v2/log"
 	"github.com/lwbio/async"
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
-type registerOptionFunc func(*consumer)
+type RegisterOptionFunc func(*consumer)
 
-func WithRegisterTopic(topic string) registerOptionFunc {
+func WithRegisterName(name string) RegisterOptionFunc {
+	return func(o *consumer) {
+		o.name = name
+	}
+}
+
+func WithRegisterTopic(topic string) RegisterOptionFunc {
 	return func(o *consumer) {
 		o.topic = topic
 	}
 }
 
-func WithRegisterMoreEvents(ets ...PbEvent) registerOptionFunc {
+func WithRegisterAllTopics() RegisterOptionFunc {
+	return func(o *consumer) {
+		o.topic = "*"
+	}
+}
+
+func WithRegisterMoreEvents(ets ...PbEvent) RegisterOptionFunc {
 	return func(o *consumer) {
 		for _, et := range ets {
 			o.exs = append(o.exs, Ex(et))
 		}
-	}
-}
-
-func WithRegisterHook(hook func(h Handler) Handler) registerOptionFunc {
-	return func(o *consumer) {
-		o.h = hook(o.h)
 	}
 }
 
@@ -47,6 +54,7 @@ func WithSubscriberLogger(log log.Logger) SubscriberOptionFunc {
 }
 
 type consumer struct {
+	name  string
 	queue string
 	h     Handler
 
@@ -85,7 +93,7 @@ func NewSubscriber(conn async.Conn, opts ...SubscriberOptionFunc) (*Subscriber, 
 	return &s, nil
 }
 
-func (s *Subscriber) register(h Handler, MustEx string, opts ...registerOptionFunc) error {
+func (s *Subscriber) register(h Handler, MustEx string, opts ...RegisterOptionFunc) error {
 	c := consumer{
 		h:     h,
 		queue: fmt.Sprintf("%s.%s", s.id, GetFunctionName(h, '/', '.')),
@@ -93,6 +101,9 @@ func (s *Subscriber) register(h Handler, MustEx string, opts ...registerOptionFu
 	}
 	for _, opt := range opts {
 		opt(&c)
+	}
+	if c.name == "" {
+		c.name = c.queue
 	}
 
 	// 声明queue
@@ -121,22 +132,28 @@ func (s *Subscriber) register(h Handler, MustEx string, opts ...registerOptionFu
 	})
 	s.consumers = append(s.consumers, c)
 
-	s.log.Log(log.LevelInfo, "register handler: %s", q.Name)
+	s.log.Log(log.LevelInfo, "register subscribe handler: %s", c.name)
 	return nil
 }
 
-func (s *Subscriber) Register(h Handler, et PbEvent, opts ...registerOptionFunc) error {
+func (s *Subscriber) Register(h Handler, et PbEvent, opts ...RegisterOptionFunc) error {
 	return s.register(h, Ex(et), opts...)
 }
 
-func (s *Subscriber) MustRegister(h Handler, et PbEvent, opts ...registerOptionFunc) {
+func (s *Subscriber) MustRegister(h Handler, et PbEvent, opts ...RegisterOptionFunc) {
 	if err := s.register(h, Ex(et), opts...); err != nil {
 		panic(err)
 	}
 }
 
-func (s *Subscriber) RegisterEx(h Handler, ex string, opts ...registerOptionFunc) error {
+func (s *Subscriber) RegisterEx(h Handler, ex string, opts ...RegisterOptionFunc) error {
 	return s.register(h, ex, opts...)
+}
+
+func (s *Subscriber) MustRegisterEx(h Handler, ex string, opts ...RegisterOptionFunc) {
+	if err := s.register(h, ex, opts...); err != nil {
+		panic(err)
+	}
 }
 
 func (s *Subscriber) Start(ctx context.Context) error {
@@ -147,6 +164,7 @@ func (s *Subscriber) Start(ctx context.Context) error {
 		default:
 			chosen, recv, recvOk := reflect.Select(s.scs)
 			if !recvOk {
+				time.Sleep(200 * time.Millisecond)
 				continue
 			}
 			c := s.consumers[chosen]
@@ -164,6 +182,10 @@ func (s *Subscriber) handle(ctx context.Context, msg amqp.Delivery, c consumer) 
 		}
 	}()
 	defer msg.Ack(false)
+
+	ctx = context.WithValue(ctx, KeyCorrelationID, msg.CorrelationId)
+	ctx = context.WithValue(ctx, KeyReplyTo, msg.ReplyTo)
+	ctx = context.WithValue(ctx, KeyExchange, msg.Exchange)
 
 	if err := c.h(ctx, msg.Body); err != nil {
 		return err

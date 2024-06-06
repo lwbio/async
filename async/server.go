@@ -11,6 +11,18 @@ import (
 
 type ServerOptionFunc func(*Server)
 
+func WithServerLogger(l log.Logger) ServerOptionFunc {
+	return func(s *Server) {
+		s.log = log.NewHelper(l)
+	}
+}
+
+func WithServerDelayExchange(ex string) ServerOptionFunc {
+	return func(s *Server) {
+		s.delayEx = ex
+	}
+}
+
 type RegisterOptionFunc func(*consumer)
 
 type consumer struct {
@@ -26,6 +38,7 @@ type Server struct {
 	consumers []consumer
 	dec       DecodeRequestFunc
 	enc       EncodeResponseFunc
+	delayEx   string
 
 	log *log.Helper
 }
@@ -43,6 +56,7 @@ func NewServer(conn async.Conn, opts ...ServerOptionFunc) (*Server, error) {
 		consumers: make([]consumer, 0),
 		dec:       DefaultRequestDecoder,
 		enc:       DefaultResponseEncoder,
+		delayEx:   DefaultDelayExchange,
 		log:       log.NewHelper(log.DefaultLogger),
 	}
 
@@ -66,6 +80,11 @@ func (s *Server) register(h Handler, queue string, resultEx string, opts ...Regi
 	// 声明queue
 	q, err := s.ch.QueueDeclare(queue, false, false, false, false, nil) // TODO: autoDelete
 	if err != nil {
+		return err
+	}
+
+	// 绑定queue到delay exchange
+	if err := s.ch.QueueBind(q.Name, q.Name, s.delayEx, false, nil); err != nil {
 		return err
 	}
 

@@ -19,6 +19,12 @@ func WithPbEvents(ets ...PbEvent) PublisherOptionFunc {
 	}
 }
 
+func WithLogger(logger log.Logger) PublisherOptionFunc {
+	return func(p *Publisher) {
+		p.log = log.NewHelper(logger)
+	}
+}
+
 type PublishOption struct {
 	rk        string
 	mandatory bool
@@ -39,21 +45,24 @@ func WithMandatory() PublishOptionFunc {
 }
 
 type Publisher struct {
-	ch  *amqp.Channel
-	exs map[int32]string
+	ch      *amqp.Channel
+	choseCh chan struct{}
+	exs     map[int32]string
+
 	log *log.Helper
 }
 
-func NewPublisher(conn async.Conn, logger log.Logger, opts ...PublisherOptionFunc) (*Publisher, error) {
+func NewPublisher(conn async.Conn, opts ...PublisherOptionFunc) (*Publisher, error) {
 	ch, err := conn.Channel()
 	if err != nil {
 		return nil, err
 	}
 
 	p := Publisher{
-		ch:  ch,
-		exs: make(map[int32]string),
-		log: log.NewHelper(log.With(logger, "module", "data/pub")),
+		ch:      ch,
+		choseCh: make(chan struct{}),
+		exs:     make(map[int32]string),
+		log:     log.NewHelper(log.DefaultLogger),
 	}
 
 	for _, opt := range opts {
@@ -73,6 +82,7 @@ func NewPublisher(conn async.Conn, logger log.Logger, opts ...PublisherOptionFun
 		); err != nil {
 			return nil, err
 		}
+		p.log.Infof("exchange [%s] declared", ex)
 	}
 
 	return &p, nil
@@ -102,10 +112,15 @@ func (p *Publisher) publish(ctx context.Context, et PbEvent, m proto.Message, op
 	return p.ch.PublishWithContext(ctx, ex, o.rk, o.mandatory, false, msg)
 }
 
-func (p *Publisher) Publish(ctx context.Context, et PbEvent, m proto.Message) error {
-	return p.publish(ctx, et, m)
+func (p *Publisher) Publish(ctx context.Context, et PbEvent, m proto.Message, opts ...PublishOptionFunc) error {
+	return p.publish(ctx, et, m, opts...)
+}
+
+func (p *Publisher) NotifyReturn(ch chan amqp.Return) {
+	p.ch.NotifyReturn(ch)
 }
 
 func (p *Publisher) Close() error {
+	defer close(p.choseCh)
 	return p.ch.Close()
 }

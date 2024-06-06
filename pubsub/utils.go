@@ -1,6 +1,7 @@
 package pubsub
 
 import (
+	"context"
 	"fmt"
 	"reflect"
 	"runtime"
@@ -8,7 +9,11 @@ import (
 )
 
 func Ex(et PbEvent) string {
-	return fmt.Sprintf("%s.%s", et.Descriptor().Parent().FullName(), strings.ToLower(et.String()))
+	return fmt.Sprintf(
+		"%s.%s",
+		et.Descriptor().FullName(),
+		ToCamel(strings.ToLower(et.String())),
+	)
 }
 
 func Id(et PbEvent) string {
@@ -73,6 +78,7 @@ func ToCamel(s string) string {
 	}
 	return string(data[:])
 }
+
 func GetFunctionName(i interface{}, seps ...rune) string {
 	// 获取函数名称
 	fn := runtime.FuncForPC(reflect.ValueOf(i).Pointer()).Name()
@@ -89,6 +95,27 @@ func GetFunctionName(i interface{}, seps ...rune) string {
 
 	if size := len(fields); size > 0 {
 		return strings.TrimSuffix(fields[size-1], "-fm")
+	}
+	return ""
+}
+
+func CorrelationIDFromContext(ctx context.Context) string {
+	if v := ctx.Value(KeyCorrelationID); v != nil {
+		return v.(string)
+	}
+	return ""
+}
+
+func ReplyToFromContext(ctx context.Context) string {
+	if v := ctx.Value(KeyReplyTo); v != nil {
+		return v.(string)
+	}
+	return ""
+}
+
+func ExchangeFromContext(ctx context.Context) string {
+	if v := ctx.Value(KeyExchange); v != nil {
+		return v.(string)
 	}
 	return ""
 }

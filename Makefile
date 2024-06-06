@@ -12,3 +12,9 @@ all:
 	cd $(WORKSPACE)
 
 
+api:
+	protoc --proto_path=./async/example \
+		   --proto_path=./annotations \
+ 	       --go_out=paths=source_relative:./async/example \
+		   --go-async_out=paths=source_relative:./async/example \
+	       api.proto
