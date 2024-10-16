@@ -25,7 +25,7 @@ func WithRegisterTopic(topic string) RegisterOptionFunc {
 	}
 }
 
-func WithRegisterAllTopics() RegisterOptionFunc {
+func WithRegisterAllTopic() RegisterOptionFunc {
 	return func(o *consumer) {
 		o.topic = "*"
 	}
@@ -47,9 +47,9 @@ func WithSubscriberId(id string) SubscriberOptionFunc {
 	}
 }
 
-func WithSubscriberLogger(log log.Logger) SubscriberOptionFunc {
+func WithSubscriberLogger(logger log.Logger) SubscriberOptionFunc {
 	return func(s *Subscriber) {
-		s.log = log
+		s.log = log.NewHelper(logger)
 	}
 }
 
@@ -69,7 +69,7 @@ type Subscriber struct {
 	scs       []reflect.SelectCase
 	consumers []consumer
 
-	log log.Logger
+	log *log.Helper
 }
 
 func NewSubscriber(conn async.Conn, opts ...SubscriberOptionFunc) (*Subscriber, error) {
@@ -83,7 +83,7 @@ func NewSubscriber(conn async.Conn, opts ...SubscriberOptionFunc) (*Subscriber, 
 		channel:   channel,
 		id:        "async", // TODO: package name
 		consumers: make([]consumer, 0),
-		log:       log.DefaultLogger,
+		log:       log.NewHelper(log.DefaultLogger),
 	}
 
 	for _, opt := range opts {
@@ -132,7 +132,7 @@ func (s *Subscriber) register(h Handler, MustEx string, opts ...RegisterOptionFu
 	})
 	s.consumers = append(s.consumers, c)
 
-	s.log.Log(log.LevelInfo, "register subscribe handler: %s", c.name)
+	s.log.Infof("consumer [%s] registered", c.name)
 	return nil
 }
 
@@ -178,7 +178,7 @@ func (s *Subscriber) Start(ctx context.Context) error {
 func (s *Subscriber) handle(ctx context.Context, msg amqp.Delivery, c consumer) error {
 	defer func() {
 		if r := recover(); r != nil {
-			s.log.Log(log.LevelError, "panic: %v", r)
+			s.log.Errorf("panic: %v", r)
 		}
 	}()
 	defer msg.Ack(false)
@@ -186,6 +186,7 @@ func (s *Subscriber) handle(ctx context.Context, msg amqp.Delivery, c consumer) 
 	ctx = context.WithValue(ctx, KeyCorrelationID, msg.CorrelationId)
 	ctx = context.WithValue(ctx, KeyReplyTo, msg.ReplyTo)
 	ctx = context.WithValue(ctx, KeyExchange, msg.Exchange)
+	ctx = context.WithValue(ctx, KeyRoutingKey, msg.RoutingKey)
 
 	if err := c.h(ctx, msg.Body); err != nil {
 		return err
