@@ -2,6 +2,7 @@ package async
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"github.com/go-kratos/kratos/v2/log"
@@ -61,22 +62,20 @@ type Client struct {
 	replyTo string
 	delayEx string
 	ch      *amqp.Channel
+	conn    async.Conn
 	codec   encoding.Codec
+	mu      sync.Mutex // Protects access to ch
 
 	log log.Logger
 }
 
 func NewClient(conn async.Conn, opts ...ClientOptionFunc) (*Client, error) {
-	ch, err := conn.Channel()
-	if err != nil {
-		return nil, err
-	}
-
 	p := Client{
-		ch:      ch,
+		conn:    conn,
 		delayEx: DefaultDelayExchange,
 		codec:   json_enc.Codec{},
 		log:     log.DefaultLogger,
+		mu:      sync.Mutex{},
 	}
 
 	for _, opt := range opts {
@@ -86,7 +85,38 @@ func NewClient(conn async.Conn, opts ...ClientOptionFunc) (*Client, error) {
 	return &p, nil
 }
 
-func (cli *Client) call(ctx context.Context, queue string, m interface{}, opts ...CallOptionFunc) (string, error) {
+func (c *Client) establishChannel() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.ch != nil { // We already have a channel.
+		return nil
+	}
+
+	ch, err := c.conn.Channel()
+	if err != nil {
+		return err
+	}
+	c.ch = ch
+	return nil
+}
+
+func (cli *Client) publish(ctx context.Context, exchange, key string, msg *amqp.Publishing) error {
+	if err := cli.establishChannel(); err != nil {
+		return err
+	}
+
+	return cli.ch.PublishWithContext(
+		ctx,
+		exchange, // 默认 exchange
+		key,      // routing key
+		true,     // mandatory：当消息无法路由到队列时，会触发Return
+		false,    // immediate：如果设置为true，消息会被立即投递到消费者
+		*msg,     // 消息内容
+	)
+}
+
+func (cli *Client) call(ctx context.Context, queue string, m any, opts ...CallOptionFunc) (string, error) {
 	o := &CallOption{}
 	for _, opt := range opts {
 		opt(o)
@@ -116,14 +146,7 @@ func (cli *Client) call(ctx context.Context, queue string, m interface{}, opts .
 		}
 	}
 
-	return o.id, cli.ch.PublishWithContext(
-		ctx,
-		ex, // 默认 exchange OR delay exchange
-		queue,
-		true, // mandatory：当消息无法路由到队列时，会触发Return
-		false,
-		msg,
-	)
+	return o.id, cli.publish(ctx, ex, queue, &msg)
 }
 
 func (cli *Client) Call(ctx context.Context, queue string, m interface{}, opts ...CallOptionFunc) (string, error) {

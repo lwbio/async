@@ -119,3 +119,10 @@ func ExchangeFromContext(ctx context.Context) string {
 	}
 	return ""
 }
+
+func RoutingKeyFromContext(ctx context.Context) string {
+	if v := ctx.Value(KeyRoutingKey); v != nil {
+		return v.(string)
+	}
+	return ""
+}

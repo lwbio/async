@@ -2,7 +2,9 @@ package async
 
 import (
 	"context"
+	"fmt"
 	"reflect"
+	"sync"
 
 	"github.com/go-kratos/kratos/v2/log"
 	"github.com/lwbio/async"
@@ -39,25 +41,21 @@ type Server struct {
 	dec       DecodeRequestFunc
 	enc       EncodeResponseFunc
 	delayEx   string
+	mu        sync.Mutex // Protects access to ch
 
 	log *log.Helper
 }
 
 func NewServer(conn async.Conn, opts ...ServerOptionFunc) (*Server, error) {
-	channel, err := conn.Channel()
-	if err != nil {
-		return nil, err
-	}
-
 	s := Server{
 		conn:      conn,
-		ch:        channel,
 		scs:       make([]reflect.SelectCase, 0),
 		consumers: make([]consumer, 0),
 		dec:       DefaultRequestDecoder,
 		enc:       DefaultResponseEncoder,
 		delayEx:   DefaultDelayExchange,
 		log:       log.NewHelper(log.DefaultLogger),
+		mu:        sync.Mutex{},
 	}
 
 	for _, opt := range opts {
@@ -65,6 +63,22 @@ func NewServer(conn async.Conn, opts ...ServerOptionFunc) (*Server, error) {
 	}
 
 	return &s, nil
+}
+
+func (s *Server) establishChannel() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.ch != nil { // We already have a channel.
+		return nil
+	}
+
+	ch, err := s.conn.Channel()
+	if err != nil {
+		return fmt.Errorf("failed to create channel: %w", err)
+	}
+	s.ch = ch
+	return nil
 }
 
 func (s *Server) register(h Handler, queue string, resultEx string, opts ...RegisterOptionFunc) error {
@@ -75,6 +89,10 @@ func (s *Server) register(h Handler, queue string, resultEx string, opts ...Regi
 	}
 	for _, opt := range opts {
 		opt(&c)
+	}
+
+	if err := s.establishChannel(); err != nil {
+		return err
 	}
 
 	// 声明queue

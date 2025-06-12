@@ -13,6 +13,7 @@ const (
 	KeyCorrelationID Key = "correlation_id"
 	KeyReplyTo       Key = "reply_to"
 	KeyExchange      Key = "exchange"
+	KeyRoutingKey    Key = "routing_key"
 )
 
 var (
