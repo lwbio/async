@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"sync"
 	"time"
 
 	"github.com/go-kratos/kratos/v2/log"
@@ -39,6 +40,16 @@ func WithRegisterMoreEvents(ets ...PbEvent) RegisterOptionFunc {
 	}
 }
 
+// 临时一次性队列，通常用于不同 pod 临时绑定
+func WithRegisterOnce() RegisterOptionFunc {
+	return func(c *consumer) {
+		c.queue.Name = ""         // 表示请求服务器生成一个随机唯一的队列名
+		c.queue.Durable = false   // 队列不持久化
+		c.queue.AutoDelete = true // 队列使用完后自动删除
+		c.queue.Exclusive = true  // 队列独占
+	}
+}
+
 type SubscriberOptionFunc func(*Subscriber)
 
 func WithSubscriberId(id string) SubscriberOptionFunc {
@@ -53,9 +64,25 @@ func WithSubscriberLogger(logger log.Logger) SubscriberOptionFunc {
 	}
 }
 
+type queue struct {
+	Name       string // 队列名称
+	Durable    bool   // 是否持久化
+	AutoDelete bool   // 是否自动删除
+	Exclusive  bool   // 是否独占
+}
+
+func newQueue(name string) *queue {
+	return &queue{
+		Name:       name,
+		Durable:    false, // 默认不持久化
+		AutoDelete: false, // 默认不自动删除
+		Exclusive:  false, // 默认不独占
+	}
+}
+
 type consumer struct {
 	name  string
-	queue string
+	queue *queue // 队列
 	h     Handler
 
 	topic string
@@ -68,22 +95,18 @@ type Subscriber struct {
 	channel   *amqp.Channel
 	scs       []reflect.SelectCase
 	consumers []consumer
+	mu        sync.Mutex // Protects access to channel
 
 	log *log.Helper
 }
 
 func NewSubscriber(conn async.Conn, opts ...SubscriberOptionFunc) (*Subscriber, error) {
-	channel, err := conn.Channel()
-	if err != nil {
-		return nil, err
-	}
-
 	s := Subscriber{
 		conn:      conn,
-		channel:   channel,
 		id:        "async", // TODO: package name
 		consumers: make([]consumer, 0),
 		log:       log.NewHelper(log.DefaultLogger),
+		mu:        sync.Mutex{},
 	}
 
 	for _, opt := range opts {
@@ -93,21 +116,50 @@ func NewSubscriber(conn async.Conn, opts ...SubscriberOptionFunc) (*Subscriber, 
 	return &s, nil
 }
 
+func (s *Subscriber) establishChannel() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.channel != nil { // We already have a channel.
+		return nil
+	}
+
+	ch, err := s.conn.Channel()
+	if err != nil {
+		return fmt.Errorf("failed to create channel: %w", err)
+	}
+	s.channel = ch
+	return nil
+}
+
 func (s *Subscriber) register(h Handler, MustEx string, opts ...RegisterOptionFunc) error {
+	queueName := fmt.Sprintf("%s.%s", s.id, GetFunctionName(h, '/', '.'))
+
 	c := consumer{
+		name:  queueName,
 		h:     h,
-		queue: fmt.Sprintf("%s.%s", s.id, GetFunctionName(h, '/', '.')),
+		queue: newQueue(queueName),
 		exs:   []string{MustEx},
 	}
+
 	for _, opt := range opts {
 		opt(&c)
 	}
-	if c.name == "" {
-		c.name = c.queue
+
+	if err := s.establishChannel(); err != nil {
+		return err
 	}
 
 	// 声明queue
-	q, err := s.channel.QueueDeclare(c.queue, false, false, false, false, nil) // TODO: autoDelete
+	cq := c.queue
+	q, err := s.channel.QueueDeclare(
+		cq.Name,
+		cq.Durable,
+		cq.AutoDelete,
+		cq.Exclusive,
+		false, // TODO: autoDelete
+		nil,
+	)
 	if err != nil {
 		return err
 	}
@@ -196,5 +248,15 @@ func (s *Subscriber) handle(ctx context.Context, msg amqp.Delivery, c consumer) 
 }
 
 func (s *Subscriber) Stop(ctx context.Context) error {
-	return s.channel.Close()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.channel == nil {
+		return nil
+	}
+	// Close the channel gracefully
+	if err := s.channel.Close(); err != nil {
+		s.log.Errorf("failed to close channel: %v", err)
+	}
+	s.channel = nil
+	return nil
 }
