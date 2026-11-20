@@ -1,28 +1,200 @@
-# This workflow will build a golang project
-# For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-go
-
 name: Go
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [main]
   pull_request:
-    branches: [ "main" ]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  GOTOOLCHAIN: local
+  GOFLAGS: -mod=readonly
 
 jobs:
-
-  build:
+  check:
+    name: Check (${{ matrix.name }})
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: runtime
+            directory: .
+          - name: generator
+            directory: cmd/protoc-gen-go-async
+    defaults:
+      run:
+        working-directory: ${{ matrix.directory }}
     steps:
-    - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: |
+            go.sum
+            cmd/protoc-gen-go-async/go.sum
+      - name: Check formatting
+        if: matrix.name == 'runtime'
+        run: |
+          mapfile -t files < <(git ls-files '*.go')
+          unformatted=$(gofmt -l "${files[@]}")
+          if [[ -n "$unformatted" ]]; then
+            echo "$unformatted"
+            echo "::error::Run gofmt on the files listed above"
+            exit 1
+          fi
+      - name: Validate workflows
+        if: matrix.name == 'runtime'
+        run: |
+          go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+          bash -n scripts/test-cluster.sh
+          bash -n scripts/benchmark-cluster.sh
+      - name: Check module files
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+      - name: Build
+        run: go build ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Race tests and coverage
+        run: |
+          go test -race -count=1 -timeout=5m -coverprofile=coverage.out -json ./... | tee test-results.json
+          go tool cover -func=coverage.out | tee coverage.txt
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: check-${{ matrix.name }}
+          path: |
+            ${{ matrix.directory }}/test-results.json
+            ${{ matrix.directory }}/coverage.out
+            ${{ matrix.directory }}/coverage.txt
+          if-no-files-found: warn
+          retention-days: 7
 
-    - name: Set up Go
-      uses: actions/setup-go@v4
-      with:
-        go-version: '1.20'
+  generated:
+    name: Generated bindings
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: |
+            go.sum
+            cmd/protoc-gen-go-async/go.sum
+      - name: Install pinned protobuf tools
+        run: |
+          curl --fail --location --retry 3 \
+            --output "$RUNNER_TEMP/protoc.zip" \
+            https://github.com/protocolbuffers/protobuf/releases/download/v31.1/protoc-31.1-linux-x86_64.zip
+          echo "96553041f1a91ea0efee963cb16f462f5985b4d65365f3907414c360044d8065  $RUNNER_TEMP/protoc.zip" | sha256sum --check
+          unzip -q "$RUNNER_TEMP/protoc.zip" -d "$RUNNER_TEMP/protoc"
+          echo "$RUNNER_TEMP/protoc/bin" >> "$GITHUB_PATH"
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.12
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: Verify generated files are current
+        run: |
+          protoc --version
+          protoc-gen-go --version
+          make generate
+          git diff --exit-code -- annotations/async cmd/protoc-gen-go-async/async examples/echo
+          untracked=$(git ls-files --others --exclude-standard -- annotations/async cmd/protoc-gen-go-async/async examples/echo)
+          if [[ -n "$untracked" ]]; then
+            echo "$untracked"
+            echo "::error::Commit the newly generated files"
+            exit 1
+          fi
 
-    - name: Build
-      run: go build -v ./...
+  integration:
+    name: RabbitMQ integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      rabbitmq:
+        image: rabbitmq:4.2.9-management
+        env:
+          RABBITMQ_DEFAULT_USER: async
+          RABBITMQ_DEFAULT_PASS: integration-test
+          RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS: "+S 2:2 -rabbit dead_letter_worker_publisher_confirm_timeout 1000"
+        ports:
+          - 5672:5672
+        options: >-
+          --health-cmd "gosu rabbitmq rabbitmq-diagnostics -q check_running"
+          --health-interval 10s --health-timeout 5s --health-retries 12
+    env:
+      ASYNC_TEST_AMQP_URL: amqp://async:integration-test@127.0.0.1:5672/
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Integration and recovery tests
+        run: go test -race -count=1 -timeout=8m -json ./... | tee integration-results.json
+      # Restart runs separately: it must not interrupt other integration tests.
+      - name: Broker restart recovery
+        env:
+          ASYNC_TEST_RESTART_NODE: ${{ job.services.rabbitmq.id }}
+        run: go test -race -count=1 -timeout=2m -run '^TestIntegrationBrokerRestart$' -json . | tee restart-results.json
+      - name: Collect broker diagnostics
+        if: failure()
+        env:
+          BROKER_ID: ${{ job.services.rabbitmq.id }}
+        run: |
+          docker logs "$BROKER_ID" > rabbitmq.log 2>&1 || true
+          docker inspect --format '{{json .State}}' "$BROKER_ID" > broker-state.json 2>&1 || true
+          timeout 30s docker exec --user rabbitmq "$BROKER_ID" rabbitmqctl list_queues name type messages_ready messages_unacknowledged > queues.log 2>&1 || true
+      - name: Upload integration reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rabbitmq-integration
+          path: |
+            integration-results.json
+            restart-results.json
+            rabbitmq.log
+            broker-state.json
+            queues.log
+          if-no-files-found: warn
+          retention-days: 7
 
-    - name: Test
-      run: go test -v ./...
+  quorum:
+    name: Three-node quorum faults
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Test minority and majority failures
+        env:
+          ASYNC_TEST_ARTIFACT_DIR: ${{ github.workspace }}/artifacts/quorum
+        run: |
+          mkdir -p artifacts/quorum
+          bash scripts/test-cluster.sh | tee artifacts/quorum/test.log
+      - name: Upload cluster reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quorum-faults
+          path: artifacts/quorum
+          if-no-files-found: warn
+          retention-days: 7

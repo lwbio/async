@@ -1,38 +1,31 @@
 {{$svrType := .ServiceType}}
 {{$svrName := .ServiceName}}
-
-{{- range .MethodSets}}
+{{range .MethodSets}}
 const AsyncOperation{{$svrType}}{{.OriginalName}} = "{{$svrName}}.{{.OriginalName}}"
-const AsyncOperation{{$svrType}}{{.OriginalName}}Result = "{{$svrName}}.{{.OriginalName}}.Result"
-{{- end}}
+{{end}}
 
 type {{.ServiceType}}AsyncServer interface {
-{{- range .MethodSets}}
-	{{- if ne .Comment ""}}
-	{{.Comment}}
-	{{- end}}
-	{{.Name}}(context.Context, *{{.Request}}) (*{{.Reply}}, error)
-{{- end}}
+{{range .MethodSets}}
+    {{.Name}}(context.Context, *{{.Request}}) (*{{.Reply}}, error)
+{{end}}
 }
 
-func Register{{.ServiceType}}AsyncServer(s *async.Server, srv {{.ServiceType}}AsyncServer) {
-	{{- range .Methods}}
-	s.MustRegister(_{{$svrType}}_{{.Name}}{{.Num}}_Async_Handler(srv), AsyncOperation{{$svrType}}{{.OriginalName}}, AsyncOperation{{$svrType}}{{.OriginalName}}Result)
-	{{- end}}
-}
-
+func Register{{.ServiceType}}AsyncServer(r *async.Runtime, srv {{.ServiceType}}AsyncServer, opts ...async.SubscriptionOption) error {
 {{range .Methods}}
-func _{{$svrType}}_{{.Name}}{{.Num}}_Async_Handler(srv {{$svrType}}AsyncServer) func(ctx async.Context) error {
-	return func(ctx async.Context) error {
-		var in {{.Request}}
-		if err := ctx.Decode(&in); err != nil {
-			return err
-		}
-		out, err := srv.{{.Name}}(ctx, &in)
-		if err != nil {
-			return err
-		}
-		return ctx.Encode(out)
-	}
+    if err := request.Register(r, AsyncOperation{{$svrType}}{{.OriginalName}}, srv.{{.Name}}, opts...); err != nil { return err }
+{{end}}
+    return nil
+}
+
+type {{.ServiceType}}AsyncClient struct { client *request.Client }
+func New{{.ServiceType}}AsyncClient(r *async.Runtime) *{{.ServiceType}}AsyncClient {
+    return &{{.ServiceType}}AsyncClient{client: request.NewClient(r)}
+}
+{{range .MethodSets}}
+func (c *{{$svrType}}AsyncClient) {{.Name}}(ctx context.Context, in *{{.Request}}, opts ...request.CallOption) (string, error) {
+    return c.client.Submit(ctx, AsyncOperation{{$svrType}}{{.OriginalName}}, in, opts...)
+}
+func Decode{{$svrType}}{{.Name}}Result(m async.Message) (request.Result[{{.Reply}}], error) {
+    return request.DecodeResultFor[{{.Reply}}](m, AsyncOperation{{$svrType}}{{.OriginalName}})
 }
 {{end}}

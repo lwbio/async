@@ -1,0 +1,9 @@
+syntax = "proto3";
+package example.echo;
+option go_package = "github.com/lwbio/async/examples/echo;echo";
+import "async/async.proto";
+message EchoRequest { string message = 1; }
+message EchoResponse { string message = 1; }
+service Echo {
+  rpc Say(EchoRequest) returns (EchoResponse) { option (async.enable) = true; }
+}

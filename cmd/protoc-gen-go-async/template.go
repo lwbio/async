@@ -13,7 +13,6 @@ var asyncTemplate string
 type serviceDesc struct {
 	ServiceType string // Greeter
 	ServiceName string // helloworld.Greeter
-	Metadata    string // api/helloworld/helloworld.proto
 	Methods     []*methodDesc
 	MethodSets  map[string]*methodDesc
 }
@@ -22,7 +21,6 @@ type methodDesc struct {
 	// method
 	Name         string
 	OriginalName string // The parsed original name
-	Num          int
 	Request      string
 	Reply        string
 	Comment      string

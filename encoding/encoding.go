@@ -1,7 +1,10 @@
 package encoding
 
 import (
+	"fmt"
+	"mime"
 	"strings"
+	"sync"
 
 	"github.com/lwbio/async/encoding/json"
 	"github.com/lwbio/async/encoding/proto"
@@ -27,6 +30,7 @@ type Codec interface {
 }
 
 var registeredCodecs = make(map[string]Codec)
+var codecMu sync.RWMutex
 
 // RegisterCodec registers the provided Codec for use with all Transport clients and
 // servers.
@@ -38,6 +42,8 @@ func RegisterCodec(codec Codec) {
 		panic("cannot register Codec with empty string result for Name()")
 	}
 	contentSubtype := strings.ToLower(codec.Name())
+	codecMu.Lock()
+	defer codecMu.Unlock()
 	registeredCodecs[contentSubtype] = codec
 }
 
@@ -46,5 +52,23 @@ func RegisterCodec(codec Codec) {
 //
 // The content-subtype is expected to be lowercase.
 func GetCodec(contentSubtype string) Codec {
-	return registeredCodecs[contentSubtype]
+	codecMu.RLock()
+	defer codecMu.RUnlock()
+	return registeredCodecs[strings.ToLower(contentSubtype)]
+}
+
+func ForContentType(contentType string) Codec {
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	if err != nil || !strings.HasPrefix(mediaType, "application/") {
+		return nil
+	}
+	return GetCodec(strings.TrimPrefix(mediaType, "application/"))
+}
+
+func Decode(contentType string, data []byte, value any) error {
+	codec := ForContentType(contentType)
+	if codec == nil {
+		return fmt.Errorf("unsupported content type %q", contentType)
+	}
+	return codec.Unmarshal(data, value)
 }

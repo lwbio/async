@@ -1,0 +1,93 @@
+name: Benchmark
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 3 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  GOTOOLCHAIN: local
+  GOFLAGS: -mod=readonly
+
+jobs:
+  benchmark:
+    name: Benchmark (${{ matrix.metrics }}, publishers=${{ matrix.publishers }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        metrics: [noop, json]
+        publishers: [1, 4]
+    services:
+      rabbitmq:
+        image: rabbitmq:4.2.9-management
+        env:
+          RABBITMQ_DEFAULT_USER: async
+          RABBITMQ_DEFAULT_PASS: benchmark-test
+          RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS: "+S 2:2"
+        ports:
+          - 5672:5672
+        options: >-
+          --health-cmd "gosu rabbitmq rabbitmq-diagnostics -q check_running"
+          --health-interval 10s --health-timeout 5s --health-retries 12
+    env:
+      ASYNC_TEST_AMQP_URL: amqp://async:benchmark-test@127.0.0.1:5672/
+      ASYNC_BENCH_METRICS: ${{ matrix.metrics }}
+      ASYNC_BENCH_METRICS_FILE: ${{ github.workspace }}/metrics.jsonl
+      ASYNC_BENCH_PUBLISHERS: ${{ matrix.publishers }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Record benchmark environment
+        env:
+          BROKER_ID: ${{ job.services.rabbitmq.id }}
+        run: |
+          {
+            go version
+            uname -a
+            lscpu
+            docker info --format '{{.Driver}}'
+            docker exec --user rabbitmq "$BROKER_ID" rabbitmq-diagnostics -q server_version
+            echo "metrics=$ASYNC_BENCH_METRICS concurrency=8 prefetch=16 quorum_nodes=1"
+            echo "publishers=$ASYNC_BENCH_PUBLISHERS"
+          } | tee environment.txt
+      # Shared CI runners have variable performance: retain samples, not a threshold.
+      - name: Run capacity and instrumentation benchmarks
+        run: |
+          go test -run '^$' -bench '^Benchmark(HandlerInstrumentation|RabbitMQ)' \
+            -benchmem -benchtime=3s -count=3 -cpu=1,8 -timeout=10m . | tee benchmark.txt
+      - name: Collect broker logs
+        if: failure()
+        env:
+          BROKER_ID: ${{ job.services.rabbitmq.id }}
+        run: |
+          docker logs "$BROKER_ID" > rabbitmq.log 2>&1 || true
+          docker inspect --format '{{json .State}}' "$BROKER_ID" > broker-state.json 2>&1 || true
+      - name: Upload benchmark reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-${{ matrix.metrics }}-publishers-${{ matrix.publishers }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            benchmark.txt
+            environment.txt
+            rabbitmq.log
+            broker-state.json
+            metrics.jsonl
+          if-no-files-found: warn
+          retention-days: 30

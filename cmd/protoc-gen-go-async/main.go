@@ -9,9 +9,8 @@ import (
 )
 
 var (
-	showVersion     = flag.Bool("version", false, "print the version and exit")
-	omitempty       = flag.Bool("omitempty", true, "omit if google.api is empty")
-	omitemptyPrefix = flag.String("omitempty_prefix", "", "omit if google.api is empty")
+	showVersion       = flag.Bool("version", false, "print the version and exit")
+	requireAnnotation = flag.Bool("require_annotation", true, "generate only methods annotated with async.enable")
 )
 
 func main() {
@@ -28,7 +27,7 @@ func main() {
 			if !f.Generate {
 				continue
 			}
-			generateFile(gen, f, *omitempty, *omitemptyPrefix)
+			generateFile(gen, f, *requireAnnotation)
 		}
 		return nil
 	})

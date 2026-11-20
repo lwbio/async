@@ -1,8 +1,8 @@
 module github.com/lwbio/async/cmd/protoc-gen-go-async
 
-go 1.19
+go 1.25.7
 
-require google.golang.org/protobuf v1.28.0
+require google.golang.org/protobuf v1.33.0
 
 require (
 	github.com/google/go-cmp v0.5.6 // indirect
